@@ -13,3 +13,9 @@ indymilter = "0.2"
 sea-orm = { version = "0.12", features = [ "runtime-tokio-rustls", "sqlx-postgres", "macros" ] }
 serde = "1"
 tokio = { version = "1", features = [ "rt-multi-thread", "signal" ] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
+
+[dev-dependencies]
+byte-strings = "0.3"
+indymilter-test = "0.0.3"

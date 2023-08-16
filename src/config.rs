@@ -9,10 +9,10 @@ pub struct Config {
 #[derive(Debug, Deserialize, PartialEq)]
 struct DbConfig {
     db_type: String,
-    db_user: String,
-    db_pass: String,
-    db_host: String,
-    db_port: String,
+    user: String,
+    pass: String,
+    host: String,
+    port: u16,
     db_name: String,
 }
 
@@ -21,10 +21,10 @@ impl Config {
         format!(
             "{}://{}:{}@{}:{}/{}",
             self.db_config.db_type,
-            self.db_config.db_user,
-            self.db_config.db_pass,
-            self.db_config.db_host,
-            self.db_config.db_port,
+            self.db_config.user,
+            self.db_config.pass,
+            self.db_config.host,
+            self.db_config.port,
             self.db_config.db_name,
         )
     }
