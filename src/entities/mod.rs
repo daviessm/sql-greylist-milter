@@ -2,5 +2,5 @@
 
 pub mod prelude;
 
-pub mod incoming_mail;
 pub mod email_status;
+pub mod incoming_mail;

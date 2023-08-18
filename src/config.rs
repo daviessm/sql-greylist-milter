@@ -1,9 +1,14 @@
+use std::str::FromStr;
+
+use ipnet::IpNet;
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize, PartialEq)]
 pub struct Config {
     db_config: DbConfig,
     listen_address: String,
+    allow_from_ranges: Option<Vec<String>>,
+    greylist_time_seconds: i64,
 }
 
 #[derive(Debug, Deserialize, PartialEq)]
@@ -31,5 +36,20 @@ impl Config {
 
     pub fn get_listen_address(&self) -> &String {
         &self.listen_address
+    }
+
+    pub fn get_allow_from_networks(&self) -> Vec<IpNet> {
+        if let Some(allow_from_ranges) = &self.allow_from_ranges {
+            allow_from_ranges
+                .iter()
+                .map(|net| IpNet::from_str(net.as_str()).expect("Unable to parse network"))
+                .collect()
+        } else {
+            vec![]
+        }
+    }
+
+    pub fn get_greylist_time_seconds(&self) -> i64 {
+        self.greylist_time_seconds
     }
 }

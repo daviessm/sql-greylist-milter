@@ -1,12 +1,6 @@
-use byte_strings::c_str;
 use indymilter::{Actions, MacroStage};
 use indymilter_test::*;
-use std::{net::Ipv4Addr, time::Duration};
-use tokio::{net::TcpListener, sync::oneshot};
-
-use crate::get_callbacks;
-
-const LOCALHOST: (Ipv4Addr, u16) = (Ipv4Addr::LOCALHOST, 0);
+use std::time::Duration;
 
 #[tokio::test]
 async fn basic() {
@@ -20,7 +14,7 @@ async fn basic() {
         .await
         .unwrap();
 
-//    assert_eq!(conn.negotiated_actions(), Actions::ADD_RCPT);
+    assert_eq!(conn.negotiated_actions(), Actions::empty());
 
     let status = conn
         .connect("client.example.org", [123, 123, 123, 123])
@@ -35,12 +29,48 @@ async fn basic() {
     let status = conn.mail(["<from@example.org>"]).await.unwrap();
     assert_eq!(status, Status::Continue);
 
-    let (actions, status) = conn.eom().await.unwrap();
+    let status = conn.rcpt(["<test@example.org>"]).await.unwrap();
+    assert_eq!(status, Status::Continue);
 
-    assert_eq!(
-        status,
-        Status::Continue
-    );
+    // Second recipient for the same message
+    let status = conn.rcpt(["<test2@example.org>"]).await.unwrap();
+    assert_eq!(status, Status::Continue);
+
+    //let status = conn.data().await.unwrap();
+    //assert_eq!(status, Status::Continue);
+
+    let status = conn
+        .header("From", "Test Testerson <test@example.org>")
+        .await
+        .unwrap();
+    assert_eq!(status, Status::Continue);
+
+    let status = conn
+        .header("To", "Test Testerson <test@example.org>")
+        .await
+        .unwrap();
+    assert_eq!(status, Status::Continue);
+
+    let status = conn
+        .header("CC", "Test Testerson <test@example.org>")
+        .await
+        .unwrap();
+    assert_eq!(status, Status::Continue);
+
+    let status = conn
+        .header(
+            "Message-Id",
+            "<12345678900987654321.1234567890@example.org>",
+        )
+        .await
+        .unwrap();
+    assert_eq!(status, Status::Continue);
+
+    let status = conn.eoh().await.unwrap();
+    assert_eq!(status, Status::Tempfail { message: None });
+
+    let (_actions, status) = conn.eom().await.unwrap();
+    assert_eq!(status, Status::Continue);
 
     conn.close().await.unwrap();
 }

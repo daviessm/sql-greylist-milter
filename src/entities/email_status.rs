@@ -1,10 +1,9 @@
-use sea_orm::{EnumIter, DeriveActiveEnum};
+use sea_orm::{DeriveActiveEnum, EnumIter};
 
 #[derive(Clone, PartialEq, Eq, Debug, EnumIter, DeriveActiveEnum)]
 #[sea_orm(rs_type = "i16", db_type = "Integer")]
 pub enum EmailStatus {
-    New = 0,
-    LocallyAcepted = 1,
+    LocallyAccepted = 1,
     IpAccepted = 2,
     AuthenticatedAccepted = 3,
     PassedGreylistAccepted = 4,

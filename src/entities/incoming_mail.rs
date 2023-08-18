@@ -15,7 +15,6 @@ pub struct Model {
     pub sending_ip: String,
     pub time_received: DateTimeWithTimeZone,
     pub time_accepted: Option<DateTimeWithTimeZone>,
-    #[sea_orm(default_value = 0)]
     pub status: EmailStatus,
 }
 
