@@ -3,12 +3,14 @@ use std::{ffi::CString, net::IpAddr, str::FromStr, sync::Arc};
 use chrono::{Duration, Utc};
 use config::Config;
 use config_file::FromConfigFile;
-use entities::{
-    email_status::EmailStatus::*, incoming_mail::ActiveModel as IncomingMailActive,
+use entity::{
+    email_status::EmailStatus::*,
+    incoming_mail::{self, ActiveModel as IncomingMailActive},
     prelude::IncomingMail,
 };
 use indymilter::{Callbacks, Context, SocketInfo, Status};
 use ipnet::IpNet;
+use migration::{Migrator, MigratorTrait};
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectOptions, Database, DatabaseConnection, EntityTrait,
     QueryFilter, Set,
@@ -16,10 +18,8 @@ use sea_orm::{
 use tokio::{net::TcpListener, signal};
 use tracing::{debug, info, warn};
 
-use crate::entities::incoming_mail;
-
 pub mod config;
-pub mod entities;
+
 #[cfg(test)]
 pub mod tests;
 
@@ -59,6 +59,11 @@ async fn main() {
             .await
             .expect("Unable to connect to database"),
     );
+
+    Migrator::up(&*db, None)
+        .await
+        .expect("Unable to run migrations");
+
     let callbacks = Callbacks::new()
         .on_connect(|context, hostname, socket_info| {
             Box::pin(handle_connect(context, hostname, socket_info))
@@ -323,7 +328,7 @@ async fn handle_eoh(
                             .and(incoming_mail::Column::Status.is_in([
                                 PassedGreylistAccepted,
                                 KnownGoodAccepted,
-                                KnownGoodAccepted,
+                                OtherAccepted,
                             ])),
                     )
                     .one(db.as_ref())
@@ -338,8 +343,18 @@ async fn handle_eoh(
                         .expect("Unable to connect to database");
                     Status::Accept
                 // Nope? Ok, then we'll have to greylist
-                } else {
+                } else if greylist_time_seconds > 0 {
                     session_data.status = Set(Greylisted);
+                    session_data
+                        .clone()
+                        .insert(db.as_ref())
+                        .await
+                        .expect("Unable to connect to database");
+                    Status::Tempfail
+                // Greylisting is disabled
+                } else {
+                    session_data.status = Set(OtherAccepted);
+                    session_data.time_accepted = Set(Some(Utc::now().into()));
                     session_data
                         .clone()
                         .insert(db.as_ref())

@@ -3,10 +3,10 @@ use sea_orm::entity::prelude::*;
 use super::email_status::EmailStatus;
 
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Eq)]
-#[sea_orm(table_name = "incoming_mail")]
+#[sea_orm(table_name = "mail")]
 pub struct Model {
     #[sea_orm(primary_key)]
-    pub incoming_mail_id: i32,
+    pub id: i32,
     pub sender_local_part: String,
     pub sender_domain: String,
     pub recipients: String,
