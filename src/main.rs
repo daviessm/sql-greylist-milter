@@ -1,11 +1,11 @@
-use std::ffi::CString;
+use std::{ffi::CString, sync::Arc, time::Duration};
 
-use crate::entities::prelude::IncomingMail;
+use chrono::Utc;
 use config::Config;
 use config_file::FromConfigFile;
-use entities::email_status::EmailStatus;
+use entities::incoming_mail::ActiveModel as IncomingMailActive;
 use indymilter::{Callbacks, Context, SocketInfo, Status};
-use sea_orm::prelude::DateTimeWithTimeZone;
+use sea_orm::{ConnectOptions, Database, Set};
 use tokio::{net::TcpListener, signal};
 use tracing::{debug, info, warn};
 
@@ -13,36 +13,6 @@ pub mod config;
 pub mod entities;
 #[cfg(test)]
 pub mod tests;
-
-struct Session {
-    pub incoming_mail_id: Option<i32>,
-    pub sender_local_part: Option<String>,
-    pub sender_domain: Option<String>,
-    pub recipients: Option<String>,
-    pub message_id: Option<String>,
-    pub sending_host_name: Option<Option<String>>,
-    pub sending_ip: Option<String>,
-    pub time_received: Option<DateTimeWithTimeZone>,
-    pub time_accepted: Option<Option<DateTimeWithTimeZone>>,
-    pub status: EmailStatus,
-}
-
-impl Session {
-    fn new() -> Session {
-        Session {
-            incoming_mail_id: None,
-            sender_local_part: None,
-            sender_domain: None,
-            recipients: None,
-            message_id: None,
-            sending_host_name: None,
-            sending_ip: None,
-            time_received: None,
-            time_accepted: None,
-            status: EmailStatus::New,
-        }
-    }
-}
 
 #[tokio::main]
 async fn main() {
@@ -67,6 +37,17 @@ async fn main() {
         .await
         .expect("Unable to open milter socket");
 
+    let mut db_options = ConnectOptions::new(config.get_db_url());
+    db_options
+        .max_connections(100)
+        .min_connections(1)
+        .connect_timeout(Duration::from_secs(2))
+        .idle_timeout(Duration::from_secs(5));
+    let orm_pool = Arc::new(
+        Database::connect(db_options)
+            .await
+            .expect("Unable to connect to database"),
+    );
     let callbacks = get_callbacks();
 
     indymilter::run(listener, callbacks, Default::default(), signal::ctrl_c())
@@ -74,7 +55,7 @@ async fn main() {
         .expect("milter execution failed");
 }
 
-fn get_callbacks() -> Callbacks<Session> {
+fn get_callbacks() -> Callbacks<IncomingMailActive> {
     Callbacks::new()
         .on_connect(|context, hostname, socket_info| {
             Box::pin(handle_connect(context, hostname, socket_info))
@@ -83,25 +64,28 @@ fn get_callbacks() -> Callbacks<Session> {
 }
 
 async fn handle_connect(
-    session: &mut Context<Session>,
+    session: &mut Context<IncomingMailActive>,
     hostname: CString,
     socket_info: SocketInfo,
 ) -> Status {
-    let mut session_data = Session::new();
+    let mut session_data = IncomingMailActive {
+        time_received: Set(Utc::now().into()),
+        ..Default::default()
+    };
 
     if let SocketInfo::Inet(addr) = socket_info {
         debug!("Connect from {}", addr.ip());
-        session_data.sending_ip = Some(addr.ip().to_string());
+        session_data.sending_ip = Set(addr.ip().to_string());
         if !hostname.is_empty() {
             session_data.sending_host_name = match hostname.into_string() {
-                Ok(string) => Some(Some(string)),
+                Ok(string) => Set(Some(string)),
                 Err(err) => {
                     warn!("Unable to read host name: {}", err);
-                    Some(None)
+                    Set(None)
                 }
             }
         } else {
-            session_data.sending_host_name = Some(None);
+            session_data.sending_host_name = Set(None);
         }
     }
 
@@ -110,7 +94,39 @@ async fn handle_connect(
     Status::Continue
 }
 
-async fn handle_mail(context: &mut Context<Session>, args: Vec<CString>) -> Status {
+async fn handle_mail(session: &mut Context<IncomingMailActive>, args: Vec<CString>) -> Status {
     debug!("Mail {:?}", args);
-    Status::Continue
+    let session_data = session.data.as_mut().expect("No session?");
+
+    if args.len() >= 1 {
+        if let Ok(sender) = args[0].clone().into_string() {
+            if sender.len() > 2 {
+                // Assume the first and last characters are < and >
+                let sender = &sender[1..sender.len() - 1];
+                let mut sender_parts = sender.split('@');
+                if let Some(sender_local_part) = sender_parts.next() {
+                    session_data.sender_local_part = Set(sender_local_part.to_string());
+                } else {
+                    warn!("No sender_local_part? (args from MAIL FROM: {:?})", args);
+                    return Status::Reject;
+                }
+                if let Some(sender_domain) = sender_parts.next() {
+                    session_data.sender_domain = Set(sender_domain.to_string());
+                    Status::Continue
+                } else {
+                    warn!("No sender_domain? (args from MAIL FROM: {:?})", args);
+                    return Status::Reject;
+                }
+            } else {
+                warn!("Sender length is < 2? (args from MAIL FROM: {:?})", args);
+                return Status::Reject;
+            }
+        } else {
+            warn!("Sender is not a valid String? (args from MAIL FROM: {:?})", args);
+            return Status::Reject;
+        }
+    } else {
+        warn!("Null sender? (args from MAIL FROM: {:?})", args);
+        return Status::Reject;
+    }
 }

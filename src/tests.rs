@@ -12,19 +12,11 @@ const LOCALHOST: (Ipv4Addr, u16) = (Ipv4Addr::LOCALHOST, 0);
 async fn basic() {
     tracing_subscriber::fmt::init();
 
-    let listener = TcpListener::bind(LOCALHOST).await.unwrap();
-    let milter_addr = listener.local_addr().unwrap();
-    let callbacks = get_callbacks();
-    let config = Default::default();
-    let (shutdown_milter, shutdown) = oneshot::channel();
-
-    let milter = tokio::spawn(indymilter::run(listener, callbacks, config, shutdown));
-
     let mut conn = TestConnection::configure()
         .read_timeout(Duration::from_secs(10))
         .write_timeout(Duration::from_secs(10))
         .available_actions(Actions::ADD_RCPT)
-        .open_tcp(milter_addr)
+        .open_tcp("[::1]:9876")
         .await
         .unwrap();
 
@@ -51,8 +43,4 @@ async fn basic() {
     );
 
     conn.close().await.unwrap();
-
-    shutdown_milter.send(()).unwrap();
-
-    milter.await.unwrap().unwrap();
 }
