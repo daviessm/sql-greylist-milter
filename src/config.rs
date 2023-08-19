@@ -9,6 +9,8 @@ pub struct Config {
     listen_address: String,
     allow_from_ranges: Option<Vec<String>>,
     greylist_time_seconds: i64,
+    blocked_senders: Option<Vec<String>>,
+    spam_message: Option<String>,
 }
 
 #[derive(Debug, Deserialize, PartialEq)]
@@ -51,5 +53,13 @@ impl Config {
 
     pub fn get_greylist_time_seconds(&self) -> i64 {
         self.greylist_time_seconds
+    }
+
+    pub fn get_blocked_senders(&self) -> Option<Vec<String>> {
+        self.blocked_senders.clone()
+    }
+
+    pub fn get_spam_message(&self) -> Option<String> {
+        self.spam_message.clone()
     }
 }

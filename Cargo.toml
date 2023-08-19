@@ -10,6 +10,7 @@ edition = "2021"
 entity = { path = "entity" }
 migration = { path = "migration" }
 
+byte-strings = "0.3"
 chrono = "0.4"
 config-file = "0.2"
 indymilter = "0.2"
