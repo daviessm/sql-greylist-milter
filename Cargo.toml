@@ -10,9 +10,8 @@ edition = "2021"
 entity = { path = "entity" }
 migration = { path = "migration" }
 
-byte-strings = "0.3"
 chrono = "0.4"
-config-file = "0.2"
+config = { version = "0.13", default-features = false, features = [ "toml" ] }
 indymilter = "0.2"
 ipnet = "2"
 sea-orm = { version = "0.12", features = [ "runtime-tokio-rustls", "sqlx-postgres", "macros" ] }

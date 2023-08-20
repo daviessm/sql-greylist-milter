@@ -1,8 +1,7 @@
 use std::{ffi::CString, net::IpAddr, str::FromStr, sync::Arc};
 
 use chrono::{Duration, Utc};
-use config::Config;
-use config_file::FromConfigFile;
+use settings::{Settings, Rewrite};
 use entity::{
     email_status::EmailStatus::*,
     mail,
@@ -22,28 +21,41 @@ use sea_orm::{
 use tokio::{net::TcpListener, signal};
 use tracing::{debug, error, info, warn};
 
-pub mod config;
-
-type SessionContext = (MailActive, Vec<RecipientModel>);
+pub mod settings;
 
 #[cfg(test)]
 pub mod tests;
+
+#[derive(Clone, Debug)]
+struct SessionData {
+    pub mail: MailActive,
+    pub recipients: Vec<(RecipientModel, RecipientStatus)>,
+}
+
+#[derive(Clone, Debug)]
+enum RecipientStatus {
+    Add(Vec<String>),
+    Change(Vec<String>),
+    Remove,
+    Keep,
+}
 
 #[tokio::main]
 async fn main() {
     // Set up logging
     tracing_subscriber::fmt::init();
 
-    let config = Config::from_config_file(format!("/etc/{}.toml", env!("CARGO_PKG_NAME")))
-        .unwrap_or_else(|_| {
+    let config = Settings::new()
+        .unwrap_or_else(|e| {
             panic!(
-                "Unable to read configuration from /etc/{}.toml",
-                env!("CARGO_PKG_NAME")
+                "Unable to read configuration from /etc/{}.toml: {}",
+                env!("CARGO_PKG_NAME"), e
             )
         });
 
     let allowed_networks = Arc::new(config.get_allow_from_networks());
     let blocked_senders = Arc::new(config.get_blocked_senders());
+    let rewrite_addresses = Arc::new(config.get_rewrites());
 
     info!(
         "Starting {} version {} on {}",
@@ -83,7 +95,15 @@ async fn main() {
             Box::pin(handle_connect(context, hostname, socket_info))
         })
         .on_mail(|context, args| Box::pin(handle_mail(context, args)))
-        .on_rcpt(move |context, args| Box::pin(handle_rcpt(context, args, db_1.clone())))
+        .on_rcpt(move |context, args| {
+            Box::pin(handle_rcpt(
+                context,
+                args,
+                db_1.clone(),
+                blocked_senders.clone(),
+                rewrite_addresses.clone(),
+            ))
+        })
         .on_header(|context, name, value| Box::pin(handle_header(context, name, value)))
         .on_eoh(move |context| {
             Box::pin(handle_eoh(
@@ -91,16 +111,16 @@ async fn main() {
                 allowed_networks.clone(),
                 db_2.clone(),
                 config.get_greylist_time_seconds(),
-                blocked_senders.clone(),
             ))
-        });
+        })
+        .on_eom(move |context| Box::pin(handle_eom(context)));
 
     indymilter::run(listener, callbacks, Default::default(), signal::ctrl_c())
         .await
         .expect("milter execution failed");
 }
 
-async fn negotiate(context: &mut NegotiateContext<SessionContext>) -> Status {
+async fn negotiate(context: &mut NegotiateContext<SessionData>) -> Status {
     context.requested_actions |= Actions::DELETE_RCPT | Actions::ADD_RCPT;
     context
         .requested_macros
@@ -110,7 +130,7 @@ async fn negotiate(context: &mut NegotiateContext<SessionContext>) -> Status {
 }
 
 async fn handle_connect(
-    session: &mut Context<SessionContext>,
+    session: &mut Context<SessionData>,
     hostname: CString,
     socket_info: SocketInfo,
 ) -> Status {
@@ -135,12 +155,15 @@ async fn handle_connect(
         }
     }
 
-    session.data = Some((session_data, vec![]));
+    session.data = Some(SessionData {
+        mail: session_data,
+        recipients: vec![],
+    });
 
     Status::Continue
 }
 
-async fn handle_mail(session: &mut Context<SessionContext>, args: Vec<CString>) -> Status {
+async fn handle_mail(session: &mut Context<SessionData>, args: Vec<CString>) -> Status {
     debug!("MAIL FROM {:?}", args);
     let session_data = session.data.as_mut().expect("No session?");
 
@@ -151,13 +174,13 @@ async fn handle_mail(session: &mut Context<SessionContext>, args: Vec<CString>) 
                 let sender = &sender[1..sender.len() - 1];
                 let mut sender_parts = sender.split('@');
                 if let Some(sender_local_part) = sender_parts.next() {
-                    session_data.0.sender_local_part = Set(sender_local_part.to_string());
+                    session_data.mail.sender_local_part = Set(sender_local_part.to_string());
                 } else {
                     warn!("No sender_local_part? (args from MAIL FROM: {:?})", args);
                     return Status::Reject;
                 }
                 if let Some(sender_domain) = sender_parts.next() {
-                    session_data.0.sender_domain = Set(sender_domain.to_string());
+                    session_data.mail.sender_domain = Set(sender_domain.to_string());
                     Status::Continue
                 } else {
                     warn!("No sender_domain? (args from MAIL FROM: {:?})", args);
@@ -181,9 +204,11 @@ async fn handle_mail(session: &mut Context<SessionContext>, args: Vec<CString>) 
 }
 
 async fn handle_rcpt(
-    session: &mut Context<SessionContext>,
+    session: &mut Context<SessionData>,
     args: Vec<CString>,
     db: Arc<DatabaseConnection>,
+    spam_addresses: Arc<Vec<String>>,
+    rewrite_addresses: Arc<Vec<Rewrite>>,
 ) -> Status {
     debug!("RCPT TO {:?}", args);
     let session_data = session.data.as_mut().expect("No session?");
@@ -198,7 +223,7 @@ async fn handle_rcpt(
                     ..Default::default()
                 };
 
-                session_data.1.push(
+                session_data.recipients.push(
                     match Insert::one(recipient_active)
                         .on_conflict(
                             OnConflict::column(recipient::Column::Recipient)
@@ -208,7 +233,15 @@ async fn handle_rcpt(
                         .exec_with_returning(db.as_ref())
                         .await
                     {
-                        Ok(recipient) => recipient,
+                        Ok(model) => (
+                            model,
+                            match is_spam_address((*spam_addresses).clone(), recipient.to_owned()) {
+                                true => RecipientStatus::Remove,
+                                false => {
+                                    change_address((*rewrite_addresses).clone(), recipient.to_owned())
+                                }
+                            },
+                        ),
                         Err(e) => {
                             error!("Unable to insert recipient: {}", e);
                             return Status::Tempfail;
@@ -234,7 +267,7 @@ async fn handle_rcpt(
 }
 
 async fn handle_header(
-    session: &mut Context<SessionContext>,
+    session: &mut Context<SessionData>,
     name: CString,
     value: CString,
 ) -> Status {
@@ -242,14 +275,14 @@ async fn handle_header(
     let session_data = session.data.as_mut().expect("No session?");
 
     // Shortcut if we already have the message-id
-    if session_data.0.message_id.is_set() {
+    if session_data.mail.message_id.is_set() {
         return Status::Continue;
     }
 
     if let Ok(name) = name.to_str() {
         if name.eq_ignore_ascii_case("message-id") {
             if let Ok(value) = value.to_str() {
-                session_data.0.message_id = Set(value.to_string());
+                session_data.mail.message_id = Set(value.to_string());
             }
         }
     } else {
@@ -260,11 +293,10 @@ async fn handle_header(
 }
 
 async fn handle_eoh(
-    session: &mut Context<SessionContext>,
+    session: &mut Context<SessionData>,
     allowed_networks: Arc<Vec<IpNet>>,
     db: Arc<DatabaseConnection>,
     greylist_time_seconds: i64,
-    spam_addresses: Arc<Option<Vec<String>>>,
 ) -> Status {
     debug!(
         "EOH, {{auth_type}}: {:?}",
@@ -273,11 +305,11 @@ async fn handle_eoh(
     let session_data = session.data.as_mut().expect("No session?");
 
     // Check we have enough information in the session now
-    if session_data.0.sending_ip.is_not_set()
-        || session_data.0.sender_local_part.is_not_set()
-        || session_data.0.sender_domain.is_not_set()
-        || session_data.0.message_id.is_not_set()
-        || session_data.1.is_empty()
+    if session_data.mail.sending_ip.is_not_set()
+        || session_data.mail.sender_local_part.is_not_set()
+        || session_data.mail.sender_domain.is_not_set()
+        || session_data.mail.message_id.is_not_set()
+        || session_data.recipients.is_empty()
     {
         warn!(
             "End of headers but we don't have all the information we need? {:?}",
@@ -286,11 +318,11 @@ async fn handle_eoh(
         return Status::Tempfail;
     }
 
-    if let Ok(from_ip) = IpAddr::from_str(session_data.0.sending_ip.clone().unwrap().as_str()) {
+    if let Ok(from_ip) = IpAddr::from_str(session_data.mail.sending_ip.clone().unwrap().as_str()) {
         // Locally-generated email
         if from_ip.is_loopback() {
-            session_data.0.status = Set(LocallyAccepted);
-            session_data.0.time_accepted = Set(Some(Utc::now().into()));
+            session_data.mail.status = Set(LocallyAccepted);
+            session_data.mail.time_accepted = Set(Some(Utc::now().into()));
             insert_mail(session_data.to_owned(), db)
                 .await
                 .expect("Unable to connect to database");
@@ -301,16 +333,16 @@ async fn handle_eoh(
             .get(&CString::new("{auth_type}").unwrap())
             .is_some()
         {
-            session_data.0.status = Set(AuthenticatedAccepted);
-            session_data.0.time_accepted = Set(Some(Utc::now().into()));
+            session_data.mail.status = Set(AuthenticatedAccepted);
+            session_data.mail.time_accepted = Set(Some(Utc::now().into()));
             insert_mail(session_data.to_owned(), db)
                 .await
                 .expect("Unable to connect to database");
             Status::Accept
         // Whitelisted networks
         } else if is_allowed_ip(allowed_networks, from_ip) {
-            session_data.0.status = Set(IpAccepted);
-            session_data.0.time_accepted = Set(Some(Utc::now().into()));
+            session_data.mail.status = Set(IpAccepted);
+            session_data.mail.time_accepted = Set(Some(Utc::now().into()));
             insert_mail(session_data.to_owned(), db)
                 .await
                 .expect("Unable to connect to database");
@@ -318,7 +350,7 @@ async fn handle_eoh(
         } else {
             // Does the message already exist in the database?
             if let Ok(Some(existing_message)) = MailEntity::find()
-                .filter(mail::Column::MessageId.eq(session_data.0.message_id.clone().unwrap()))
+                .filter(mail::Column::MessageId.eq(session_data.mail.message_id.clone().unwrap()))
                 .one(db.as_ref())
                 .await
             {
@@ -358,7 +390,7 @@ async fn handle_eoh(
                 if let Ok(Some(_)) = MailEntity::find()
                     .filter(
                         mail::Column::SendingIp
-                            .eq(session_data.0.sending_ip.clone().unwrap())
+                            .eq(session_data.mail.sending_ip.clone().unwrap())
                             .and(mail::Column::Status.is_in([
                                 PassedGreylistAccepted,
                                 KnownGoodAccepted,
@@ -368,23 +400,23 @@ async fn handle_eoh(
                     .one(db.as_ref())
                     .await
                 {
-                    session_data.0.status = Set(KnownGoodAccepted);
-                    session_data.0.time_accepted = Set(Some(Utc::now().into()));
+                    session_data.mail.status = Set(KnownGoodAccepted);
+                    session_data.mail.time_accepted = Set(Some(Utc::now().into()));
                     insert_mail(session_data.to_owned(), db)
                         .await
                         .expect("Unable to connect to database");
                     Status::Accept
                 // Nope? Ok, then we'll have to greylist
                 } else if greylist_time_seconds > 0 {
-                    session_data.0.status = Set(Greylisted);
+                    session_data.mail.status = Set(Greylisted);
                     insert_mail(session_data.to_owned(), db)
                         .await
                         .expect("Unable to connect to database");
                     Status::Tempfail
                 // Greylisting is disabled
                 } else {
-                    session_data.0.status = Set(OtherAccepted);
-                    session_data.0.time_accepted = Set(Some(Utc::now().into()));
+                    session_data.mail.status = Set(OtherAccepted);
+                    session_data.mail.time_accepted = Set(Some(Utc::now().into()));
                     insert_mail(session_data.to_owned(), db)
                         .await
                         .expect("Unable to connect to database");
@@ -395,10 +427,14 @@ async fn handle_eoh(
     } else {
         warn!(
             "Unable to parse IP address {}",
-            session_data.0.sending_ip.clone().unwrap()
+            session_data.mail.sending_ip.clone().unwrap()
         );
         Status::Tempfail
     }
+}
+
+async fn handle_eom(context: &mut EomContext<SessionData>) -> Status {
+    Status::Continue
 }
 
 fn is_allowed_ip(allowed_networks: Arc<Vec<IpNet>>, address: IpAddr) -> bool {
@@ -410,30 +446,40 @@ fn is_allowed_ip(allowed_networks: Arc<Vec<IpNet>>, address: IpAddr) -> bool {
     false
 }
 
-fn is_spam_address(spam_addresses: Option<Vec<String>>, address: String) -> bool {
-    if let Some(spam_addresses) = spam_addresses {
-        for spam_address in spam_addresses {
-            if spam_address.eq_ignore_ascii_case(&address) {
-                return true;
-            }
+fn is_spam_address(spam_addresses: Vec<String>, address: String) -> bool {
+    for spam_address in spam_addresses {
+        if spam_address.eq_ignore_ascii_case(&address) {
+            return true;
         }
     }
     false
 }
 
+fn change_address(rewrite_addresses: Vec<Rewrite>, address: String) -> RecipientStatus {
+    for rewrite_address in rewrite_addresses {
+        if rewrite_address.old_to.eq_ignore_ascii_case(&address) {
+            return match rewrite_address.action {
+                settings::ChangeRecipientAction::Add => RecipientStatus::Add(rewrite_address.new_to),
+                settings::ChangeRecipientAction::Replace => RecipientStatus::Change(rewrite_address.new_to)
+            };
+        }
+    }
+    RecipientStatus::Keep
+}
+
 async fn insert_mail(
-    session: SessionContext,
+    session: SessionData,
     db: Arc<DatabaseConnection>,
 ) -> Result<(), TransactionError<DbErr>> {
     db.transaction::<_, (), DbErr>(|txn| {
         Box::pin(async move {
-            let mail = session.0.save(txn).await?;
+            let mail = session.mail.save(txn).await?;
             let mail_id = mail.id.unwrap();
 
-            for recipient in session.1 {
+            for recipient in session.recipients {
                 MailRecipientActive {
                     mail_id: Set(mail_id),
-                    recipient_id: Set(recipient.id),
+                    recipient_id: Set(recipient.0.id),
                     ..Default::default()
                 }
                 .save(txn)
