@@ -1,4 +1,4 @@
-use std::{str::FromStr, env};
+use std::str::FromStr;
 
 use config::{Config, ConfigError, File};
 use ipnet::IpNet;
@@ -59,24 +59,28 @@ pub enum ChangeRecipientAction {
 }
 
 impl Settings {
-    pub fn new() -> Result<Self, ConfigError> {
+    pub fn new(path: String) -> Result<Self, ConfigError> {
         let s = Config::builder()
-            .add_source(File::with_name(&format!("/etc/{}.toml", env!("CARGO_PKG_NAME"))))
+            .add_source(File::with_name(&path))
             .build()?;
 
         s.try_deserialize()
     }
 
     pub fn get_db_url(&self) -> String {
-        format!(
-            "{}://{}:{}@{}:{}/{}",
-            self.database.r#type,
-            self.database.user,
-            self.database.pass,
-            self.database.host,
-            self.database.port,
-            self.database.db_name,
-        )
+        if self.database.r#type.eq("sqlite") {
+            format!("sqlite:{}", self.database.db_name)
+        } else {
+            format!(
+                "{}://{}:{}@{}:{}/{}",
+                self.database.r#type,
+                self.database.user,
+                self.database.pass,
+                self.database.host,
+                self.database.port,
+                self.database.db_name,
+            )
+        }
     }
 
     pub fn get_listen_address(&self) -> &String {
@@ -85,7 +89,8 @@ impl Settings {
 
     pub fn get_allow_from_networks(&self) -> Vec<IpNet> {
         if let Some(greylist) = &self.greylist {
-            greylist.allow_from_ranges
+            greylist
+                .allow_from_ranges
                 .iter()
                 .map(|net| IpNet::from_str(net.as_str()).expect("Unable to parse network"))
                 .collect()

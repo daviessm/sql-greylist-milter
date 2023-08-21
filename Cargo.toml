@@ -1,5 +1,5 @@
 [package]
-name = "sql-greylist-milter"
+name = "sql_greylist_milter"
 version = "0.0.1"
 description = "Greylist using Postgres"
 license = "GPL-3.0-or-later"
@@ -12,9 +12,10 @@ migration = { path = "migration" }
 
 chrono = "0.4"
 config = { version = "0.13", default-features = false, features = [ "toml" ] }
+futures = "0.3"
 indymilter = "0.2"
 ipnet = "2"
-sea-orm = { version = "0.12", features = [ "runtime-tokio-rustls", "sqlx-postgres", "macros" ] }
+sea-orm = { version = "0.12", features = [ "runtime-tokio-rustls", "sqlx-postgres", "sqlx-sqlite", "macros" ] }
 serde = "1"
 tokio = { version = "1", features = [ "rt-multi-thread", "signal" ] }
 tracing = "0.1"

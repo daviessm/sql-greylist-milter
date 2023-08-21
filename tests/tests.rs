@@ -1,20 +1,13 @@
+mod common;
+
 use indymilter::{Actions, MacroStage};
 use indymilter_test::*;
-use std::time::Duration;
 
 #[tokio::test]
 async fn basic() {
-    tracing_subscriber::fmt::init();
+    let (mut conn, shutdown_sender) = common::setup().await;
 
-    let mut conn = TestConnection::configure()
-        .read_timeout(Duration::from_secs(10))
-        .write_timeout(Duration::from_secs(10))
-        .available_actions(Actions::ADD_RCPT)
-        .open_tcp("[::1]:9876")
-        .await
-        .unwrap();
-
-    assert_eq!(conn.negotiated_actions(), Actions::empty());
+    assert_eq!(conn.negotiated_actions(), Actions::ADD_RCPT | Actions::DELETE_RCPT);
 
     let status = conn
         .connect("client.example.org", [123, 123, 123, 123])
@@ -22,7 +15,7 @@ async fn basic() {
         .unwrap();
     assert_eq!(status, Status::Continue);
 
-    conn.macros(MacroStage::Mail, [("{auth_authen}", "from@example.org")])
+    conn.macros(MacroStage::Eoh, [("{auth_type}", "sasl")])
         .await
         .unwrap();
 
@@ -73,4 +66,6 @@ async fn basic() {
     assert_eq!(status, Status::Continue);
 
     conn.close().await.unwrap();
+
+    common::shutdown(shutdown_sender);
 }
