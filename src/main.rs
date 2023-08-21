@@ -1,7 +1,6 @@
 use std::{ffi::CString, net::IpAddr, str::FromStr, sync::Arc};
 
 use chrono::{Duration, Utc};
-use settings::{Settings, Rewrite};
 use entity::{
     email_status::EmailStatus::*,
     mail,
@@ -9,7 +8,8 @@ use entity::{
     recipient,
 };
 use indymilter::{
-    Actions, Callbacks, Context, EomContext, MacroStage, NegotiateContext, SocketInfo, Status,
+    Actions, Callbacks, Context, ContextActions, EomContext, MacroStage, NegotiateContext,
+    ProtoOpts, SocketInfo, Status,
 };
 use ipnet::IpNet;
 use migration::{Migrator, MigratorTrait};
@@ -18,6 +18,7 @@ use sea_orm::{
     DatabaseConnection, DbErr, EntityTrait, Insert, QueryFilter, Set, TransactionError,
     TransactionTrait,
 };
+use settings::{Rewrite, Settings};
 use tokio::{net::TcpListener, signal};
 use tracing::{debug, error, info, warn};
 
@@ -45,13 +46,13 @@ async fn main() {
     // Set up logging
     tracing_subscriber::fmt::init();
 
-    let config = Settings::new()
-        .unwrap_or_else(|e| {
-            panic!(
-                "Unable to read configuration from /etc/{}.toml: {}",
-                env!("CARGO_PKG_NAME"), e
-            )
-        });
+    let config = Settings::new().unwrap_or_else(|e| {
+        panic!(
+            "Unable to read configuration from /etc/{}.toml: {}",
+            env!("CARGO_PKG_NAME"),
+            e
+        )
+    });
 
     let allowed_networks = Arc::new(config.get_allow_from_networks());
     let blocked_senders = Arc::new(config.get_blocked_senders());
@@ -122,6 +123,8 @@ async fn main() {
 
 async fn negotiate(context: &mut NegotiateContext<SessionData>) -> Status {
     context.requested_actions |= Actions::DELETE_RCPT | Actions::ADD_RCPT;
+    context.requested_opts |=
+        ProtoOpts::NO_HELO | ProtoOpts::NO_DATA | ProtoOpts::NO_BODY | ProtoOpts::NO_UNKNOWN;
     context
         .requested_macros
         .insert(MacroStage::Eom, CString::new("{auth_type}").unwrap());
@@ -237,9 +240,10 @@ async fn handle_rcpt(
                             model,
                             match is_spam_address((*spam_addresses).clone(), recipient.to_owned()) {
                                 true => RecipientStatus::Remove,
-                                false => {
-                                    change_address((*rewrite_addresses).clone(), recipient.to_owned())
-                                }
+                                false => change_address(
+                                    (*rewrite_addresses).clone(),
+                                    recipient.to_owned(),
+                                ),
                             },
                         ),
                         Err(e) => {
@@ -434,6 +438,59 @@ async fn handle_eoh(
 }
 
 async fn handle_eom(context: &mut EomContext<SessionData>) -> Status {
+    if let Some(data) = &context.data {
+        for (model, recipient_status) in &data.recipients {
+            match recipient_status {
+                RecipientStatus::Add(additions) => {
+                    for recipient in additions {
+                        match context.actions.add_recipient(recipient.to_string()).await {
+                            Ok(_) => (),
+                            Err(e) => {
+                                warn!("Unable to add recipient: {}", e);
+                                return Status::Tempfail;
+                            }
+                        }
+                    }
+                }
+                RecipientStatus::Change(additions) => {
+                    match context
+                        .actions
+                        .delete_recipient(model.recipient.clone())
+                        .await
+                    {
+                        Ok(_) => (),
+                        Err(e) => {
+                            warn!("Unable to remove recipient: {}", e);
+                            return Status::Tempfail;
+                        }
+                    }
+                    for recipient in additions {
+                        match context.actions.add_recipient(recipient.to_string()).await {
+                            Ok(_) => (),
+                            Err(e) => {
+                                warn!("Unable to add recipient: {}", e);
+                                return Status::Tempfail;
+                            }
+                        }
+                    }
+                }
+                RecipientStatus::Remove => {
+                    match context
+                        .actions
+                        .delete_recipient(model.recipient.clone())
+                        .await
+                    {
+                        Ok(_) => (),
+                        Err(e) => {
+                            warn!("Unable to remove recipient: {}", e);
+                            return Status::Tempfail;
+                        }
+                    }
+                }
+                RecipientStatus::Keep => (),
+            };
+        }
+    }
     Status::Continue
 }
 
@@ -459,8 +516,12 @@ fn change_address(rewrite_addresses: Vec<Rewrite>, address: String) -> Recipient
     for rewrite_address in rewrite_addresses {
         if rewrite_address.old_to.eq_ignore_ascii_case(&address) {
             return match rewrite_address.action {
-                settings::ChangeRecipientAction::Add => RecipientStatus::Add(rewrite_address.new_to),
-                settings::ChangeRecipientAction::Replace => RecipientStatus::Change(rewrite_address.new_to)
+                settings::ChangeRecipientAction::Add => {
+                    RecipientStatus::Add(rewrite_address.new_to)
+                }
+                settings::ChangeRecipientAction::Replace => {
+                    RecipientStatus::Change(rewrite_address.new_to)
+                }
             };
         }
     }

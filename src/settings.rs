@@ -109,10 +109,7 @@ impl Settings {
     }
 
     pub fn get_spam_message(&self) -> Option<String> {
-        match &self.spam {
-            Some(spam) => Some(spam.reject_message.clone()),
-            None => None,
-        }
+        self.spam.as_ref().map(|spam| spam.reject_message.clone())
     }
 
     pub fn get_rewrites(&self) -> Vec<Rewrite> {
