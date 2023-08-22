@@ -39,7 +39,7 @@ impl MigrationTrait for Migration {
                     )
                     .col(ColumnDef::new(Mail::TimeAccepted).timestamp_with_time_zone())
                     .col(ColumnDef::new(Mail::Status).tiny_integer().not_null())
-                    .to_owned(),
+                    .clone(),
             )
             .await?;
 
@@ -51,7 +51,7 @@ impl MigrationTrait for Migration {
                     .table(Mail::Table)
                     .col(Mail::MessageId)
                     .unique()
-                    .to_owned(),
+                    .clone(),
             )
             .await?;
 
@@ -63,7 +63,7 @@ impl MigrationTrait for Migration {
                     .table(Mail::Table)
                     .col(Mail::SendingIp)
                     .col(Mail::Status)
-                    .to_owned(),
+                    .clone(),
             )
             .await?;
 
@@ -84,7 +84,7 @@ impl MigrationTrait for Migration {
                             .string_len(100)
                             .not_null(),
                     )
-                    .to_owned(),
+                    .clone(),
             )
             .await?;
 
@@ -96,7 +96,7 @@ impl MigrationTrait for Migration {
                     .table(Recipient::Table)
                     .col(Recipient::Recipient)
                     .unique()
-                    .to_owned(),
+                    .clone(),
             )
             .await?;
 
@@ -130,7 +130,7 @@ impl MigrationTrait for Migration {
                             .to(Recipient::Table, Recipient::Id)
                             .on_delete(ForeignKeyAction::Restrict),
                     )
-                    .to_owned(),
+                    .clone(),
             )
             .await?;
 
@@ -187,15 +187,15 @@ impl MigrationTrait for Migration {
 
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         manager
-            .drop_table(Table::drop().table(MailRecipient::Table).to_owned())
+            .drop_table(Table::drop().table(MailRecipient::Table).clone())
             .await?;
 
         manager
-            .drop_table(Table::drop().table(Recipient::Table).to_owned())
+            .drop_table(Table::drop().table(Recipient::Table).clone())
             .await?;
 
         manager
-            .drop_table(Table::drop().table(Mail::Table).to_owned())
+            .drop_table(Table::drop().table(Mail::Table).clone())
             .await?;
 
         Ok(())

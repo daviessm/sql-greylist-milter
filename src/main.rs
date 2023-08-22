@@ -12,7 +12,7 @@ async fn main() {
         format!("/etc/{}.toml", env!("CARGO_PKG_NAME")),
         await_sigint(),
     )
-    .await
+    .await;
 }
 
 async fn await_sigint() -> io::Result<()> {

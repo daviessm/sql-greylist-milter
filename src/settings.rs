@@ -52,14 +52,15 @@ pub enum ChangeRecipientAction {
 }
 
 impl Settings {
-    pub fn new(path: String) -> Result<Self, ConfigError> {
+    pub fn new(path: &str) -> Result<Self, ConfigError> {
         let s = Config::builder()
-            .add_source(File::with_name(&path))
+            .add_source(File::with_name(path))
             .build()?;
 
         s.try_deserialize()
     }
 
+    #[must_use]
     pub fn get_db_url(&self) -> String {
         if self.database.r#type.eq("sqlite") {
             format!("sqlite:{}", self.database.db_name)
@@ -76,10 +77,12 @@ impl Settings {
         }
     }
 
+    #[must_use]
     pub fn get_listen_address(&self) -> &String {
         &self.milter.listen_address
     }
 
+    #[must_use]
     pub fn get_allow_from_networks(&self) -> Vec<IpNet> {
         if let Some(greylist) = &self.greylist {
             greylist
@@ -92,6 +95,7 @@ impl Settings {
         }
     }
 
+    #[must_use]
     pub fn get_greylist_time_seconds(&self) -> i64 {
         match &self.greylist {
             Some(greylist) => greylist.greylist_time_seconds,
@@ -99,6 +103,7 @@ impl Settings {
         }
     }
 
+    #[must_use]
     pub fn get_rewrites(&self) -> Vec<Rewrite> {
         match &self.recipient_rewriting {
             Some(rewrites) => rewrites.rewrites.clone(),

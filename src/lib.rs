@@ -2,14 +2,17 @@ use std::{ffi::CString, future::Future, net::IpAddr, str::FromStr, sync::Arc};
 
 use chrono::{Duration, Utc};
 use entity::{
-    email_status::EmailStatus::*,
+    email_status::EmailStatus::{
+        AuthenticatedAccepted, Denied, Greylisted, IpAccepted, KnownGoodAccepted, LocallyAccepted,
+        OtherAccepted, PassedGreylistAccepted,
+    },
     mail,
     prelude::{MailActive, MailEntity, MailRecipientActive, RecipientActive, RecipientModel},
     recipient,
 };
 use indymilter::{
-    Callbacks, Context, ContextActions, EomContext, MacroStage, NegotiateContext, SocketInfo,
-    Status,
+    Callbacks, Config, Context, ContextActions, EomContext, MacroStage, NegotiateContext,
+    SocketInfo, Status,
 };
 use ipnet::IpNet;
 use migration::{Migrator, MigratorTrait};
@@ -38,7 +41,7 @@ enum RecipientStatus {
 }
 
 pub async fn real_main(config_location: String, shutdown: impl Future) {
-    let config = Settings::new(config_location).unwrap_or_else(|e| {
+    let config = Settings::new(&config_location).unwrap_or_else(|e| {
         panic!(
             "Unable to read configuration from {}: {}",
             env!("CARGO_PKG_NAME"),
@@ -106,7 +109,7 @@ pub async fn real_main(config_location: String, shutdown: impl Future) {
         })
         .on_eom(move |context| Box::pin(handle_eom(context)));
 
-    indymilter::run(listener, callbacks, Default::default(), shutdown)
+    indymilter::run(listener, callbacks, Config::default(), shutdown)
         .await
         .expect("milter execution failed");
 }
@@ -132,7 +135,9 @@ async fn handle_connect(
     if let SocketInfo::Inet(addr) = socket_info {
         debug!("Connect from {}", addr.ip());
         session_data.sending_ip = Set(addr.ip().to_string());
-        if !hostname.is_empty() {
+        if hostname.is_empty() {
+            session_data.sending_host_name = Set(None);
+        } else {
             session_data.sending_host_name = match hostname.into_string() {
                 Ok(string) => Set(Some(string)),
                 Err(err) => {
@@ -140,8 +145,6 @@ async fn handle_connect(
                     Set(None)
                 }
             }
-        } else {
-            session_data.sending_host_name = Set(None);
         }
     }
 
@@ -157,38 +160,36 @@ async fn handle_mail(session: &mut Context<SessionData>, args: Vec<CString>) -> 
     debug!("MAIL FROM {:?}", args);
     let session_data = session.data.as_mut().expect("No session?");
 
-    if !args.is_empty() {
-        if let Ok(sender) = args[0].clone().into_string() {
-            if sender.len() > 2 {
-                // Assume the first and last characters are < and >
-                let sender = &sender[1..sender.len() - 1];
-                let mut sender_parts = sender.split('@');
-                if let Some(sender_local_part) = sender_parts.next() {
-                    session_data.mail.sender_local_part = Set(sender_local_part.to_string());
-                } else {
-                    warn!("No sender_local_part? (args from MAIL FROM: {:?})", args);
-                    return Status::Reject;
-                }
-                if let Some(sender_domain) = sender_parts.next() {
-                    session_data.mail.sender_domain = Set(sender_domain.to_string());
-                    Status::Continue
-                } else {
-                    warn!("No sender_domain? (args from MAIL FROM: {:?})", args);
-                    Status::Reject
-                }
+    if args.is_empty() {
+        warn!("Null sender? (args from MAIL FROM: {:?})", args);
+        Status::Reject
+    } else if let Ok(sender) = args[0].clone().into_string() {
+        if sender.len() > 2 {
+            // Assume the first and last characters are < and >
+            let sender = &sender[1..sender.len() - 1];
+            let mut sender_parts = sender.split('@');
+            if let Some(sender_local_part) = sender_parts.next() {
+                session_data.mail.sender_local_part = Set(sender_local_part.to_string());
             } else {
-                warn!("Sender length is < 2? (args from MAIL FROM: {:?})", args);
+                warn!("No sender_local_part? (args from MAIL FROM: {:?})", args);
+                return Status::Reject;
+            }
+            if let Some(sender_domain) = sender_parts.next() {
+                session_data.mail.sender_domain = Set(sender_domain.to_string());
+                Status::Continue
+            } else {
+                warn!("No sender_domain? (args from MAIL FROM: {:?})", args);
                 Status::Reject
             }
         } else {
-            warn!(
-                "Sender is not a valid String? (args from MAIL FROM: {:?})",
-                args
-            );
+            warn!("Sender length is < 2? (args from MAIL FROM: {:?})", args);
             Status::Reject
         }
     } else {
-        warn!("Null sender? (args from MAIL FROM: {:?})", args);
+        warn!(
+            "Sender is not a valid String? (args from MAIL FROM: {:?})",
+            args
+        );
         Status::Reject
     }
 }
@@ -202,50 +203,48 @@ async fn handle_rcpt(
     debug!("RCPT TO {:?}", args);
     let session_data = session.data.as_mut().expect("No session?");
 
-    if !args.is_empty() {
-        if let Ok(recipient) = args[0].clone().into_string() {
-            if recipient.len() > 2 {
-                // Assume the first and last characters are < and >
-                let recipient = &recipient[1..recipient.len() - 1];
-                let recipient_active = RecipientActive {
-                    recipient: Set(recipient.to_owned()),
-                    ..Default::default()
-                };
+    if args.is_empty() {
+        warn!("Null recipient? (args from RCPT TO: {:?})", args);
+        Status::Reject
+    } else if let Ok(recipient) = args[0].clone().into_string() {
+        if recipient.len() > 2 {
+            // Assume the first and last characters are < and >
+            let recipient = &recipient[1..recipient.len() - 1];
+            let recipient_active = RecipientActive {
+                recipient: Set(recipient.to_owned()),
+                ..Default::default()
+            };
 
-                session_data.recipients.push(
-                    match Insert::one(recipient_active)
-                        .on_conflict(
-                            OnConflict::column(recipient::Column::Recipient)
-                                .update_column(recipient::Column::Recipient)
-                                .to_owned(),
-                        )
-                        .exec_with_returning(db.as_ref())
-                        .await
-                    {
-                        Ok(model) => (
-                            model,
-                            change_address((*rewrite_addresses).clone(), recipient.to_owned()),
-                        ),
-                        Err(e) => {
-                            error!("Unable to insert recipient: {}", e);
-                            return Status::Tempfail;
-                        }
-                    },
-                );
-                Status::Continue
-            } else {
-                warn!("Recipient length is < 2? (args from RCPT TO: {:?})", args);
-                Status::Reject
-            }
-        } else {
-            warn!(
-                "Recipient is not a valid String? (args from RCPT TO: {:?})",
-                args
+            session_data.recipients.push(
+                match Insert::one(recipient_active)
+                    .on_conflict(
+                        OnConflict::column(recipient::Column::Recipient)
+                            .update_column(recipient::Column::Recipient)
+                            .clone(),
+                    )
+                    .exec_with_returning(db.as_ref())
+                    .await
+                {
+                    Ok(model) => (
+                        model,
+                        change_address((*rewrite_addresses).clone(), recipient),
+                    ),
+                    Err(e) => {
+                        error!("Unable to insert recipient: {}", e);
+                        return Status::Tempfail;
+                    }
+                },
             );
+            Status::Continue
+        } else {
+            warn!("Recipient length is < 2? (args from RCPT TO: {:?})", args);
             Status::Reject
         }
     } else {
-        warn!("Null recipient? (args from RCPT TO: {:?})", args);
+        warn!(
+            "Recipient is not a valid String? (args from RCPT TO: {:?})",
+            args
+        );
         Status::Reject
     }
 }
@@ -308,7 +307,7 @@ async fn handle_eoh(
         if from_ip.is_loopback() {
             session_data.mail.status = Set(LocallyAccepted);
             session_data.mail.time_accepted = Set(Some(Utc::now().into()));
-            insert_mail(session_data.to_owned(), db)
+            insert_mail(session_data.clone(), db)
                 .await
                 .expect("Unable to connect to database");
             debug!(?session_data.mail.sending_ip, "Locally accepted");
@@ -317,16 +316,16 @@ async fn handle_eoh(
         } else if let Some(auth_type) = session.macros.get(&CString::new("{auth_type}").unwrap()) {
             session_data.mail.status = Set(AuthenticatedAccepted);
             session_data.mail.time_accepted = Set(Some(Utc::now().into()));
-            insert_mail(session_data.to_owned(), db)
+            insert_mail(session_data.clone(), db)
                 .await
                 .expect("Unable to connect to database");
             debug!(?auth_type, "Authenticated accepted");
             Status::Continue
         // Whitelisted networks
-        } else if is_allowed_ip(allowed_networks, from_ip) {
+        } else if is_allowed_ip(&allowed_networks, from_ip) {
             session_data.mail.status = Set(IpAccepted);
             session_data.mail.time_accepted = Set(Some(Utc::now().into()));
-            insert_mail(session_data.to_owned(), db)
+            insert_mail(session_data.clone(), db)
                 .await
                 .expect("Unable to connect to database");
             debug!(?from_ip, "IP accepted");
@@ -388,7 +387,7 @@ async fn handle_eoh(
                 {
                     session_data.mail.status = Set(KnownGoodAccepted);
                     session_data.mail.time_accepted = Set(Some(Utc::now().into()));
-                    insert_mail(session_data.to_owned(), db)
+                    insert_mail(session_data.clone(), db)
                         .await
                         .expect("Unable to connect to database");
                     debug!("Known good - accepted");
@@ -396,7 +395,7 @@ async fn handle_eoh(
                 // Nope? Ok, then we'll have to greylist
                 } else if greylist_time_seconds > 0 {
                     session_data.mail.status = Set(Greylisted);
-                    insert_mail(session_data.to_owned(), db)
+                    insert_mail(session_data.clone(), db)
                         .await
                         .expect("Unable to connect to database");
                     debug!("Greylist");
@@ -405,7 +404,7 @@ async fn handle_eoh(
                 } else {
                     session_data.mail.status = Set(OtherAccepted);
                     session_data.mail.time_accepted = Set(Some(Utc::now().into()));
-                    insert_mail(session_data.to_owned(), db)
+                    insert_mail(session_data.clone(), db)
                         .await
                         .expect("Unable to connect to database");
                     debug!("Greylisting disabled - accepted");
@@ -466,7 +465,7 @@ async fn handle_eom(context: &mut EomContext<SessionData>) -> Status {
     Status::Continue
 }
 
-fn is_allowed_ip(allowed_networks: Arc<Vec<IpNet>>, address: IpAddr) -> bool {
+fn is_allowed_ip(allowed_networks: &Arc<Vec<IpNet>>, address: IpAddr) -> bool {
     for allowed_network in allowed_networks.as_ref() {
         if allowed_network.contains(&address) {
             return true;
@@ -475,9 +474,9 @@ fn is_allowed_ip(allowed_networks: Arc<Vec<IpNet>>, address: IpAddr) -> bool {
     false
 }
 
-fn change_address(rewrite_addresses: Vec<Rewrite>, address: String) -> RecipientStatus {
+fn change_address(rewrite_addresses: Vec<Rewrite>, address: &str) -> RecipientStatus {
     for rewrite_address in rewrite_addresses {
-        if rewrite_address.old_to.eq_ignore_ascii_case(&address) {
+        if rewrite_address.old_to.eq_ignore_ascii_case(address) {
             return match rewrite_address.action {
                 settings::ChangeRecipientAction::Add => {
                     RecipientStatus::Add(rewrite_address.new_to)
