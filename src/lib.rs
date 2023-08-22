@@ -34,7 +34,6 @@ struct SessionData {
 enum RecipientStatus {
     Add(Vec<String>),
     Change(Vec<String>),
-    Remove,
     Keep,
 }
 
@@ -48,7 +47,6 @@ pub async fn real_main(config_location: String, shutdown: impl Future) {
     });
 
     let allowed_networks = Arc::new(config.get_allow_from_networks());
-    let blocked_senders = Arc::new(config.get_blocked_senders());
     let rewrite_addresses = Arc::new(config.get_rewrites());
 
     info!(
@@ -94,7 +92,6 @@ pub async fn real_main(config_location: String, shutdown: impl Future) {
                 context,
                 args,
                 db_1.clone(),
-                blocked_senders.clone(),
                 rewrite_addresses.clone(),
             ))
         })
@@ -200,7 +197,6 @@ async fn handle_rcpt(
     session: &mut Context<SessionData>,
     args: Vec<CString>,
     db: Arc<DatabaseConnection>,
-    spam_addresses: Arc<Vec<String>>,
     rewrite_addresses: Arc<Vec<Rewrite>>,
 ) -> Status {
     debug!("RCPT TO {:?}", args);
@@ -228,13 +224,7 @@ async fn handle_rcpt(
                     {
                         Ok(model) => (
                             model,
-                            match is_spam_address((*spam_addresses).clone(), recipient.to_owned()) {
-                                true => RecipientStatus::Remove,
-                                false => change_address(
-                                    (*rewrite_addresses).clone(),
-                                    recipient.to_owned(),
-                                ),
-                            },
+                            change_address((*rewrite_addresses).clone(), recipient.to_owned()),
                         ),
                         Err(e) => {
                             error!("Unable to insert recipient: {}", e);
@@ -469,19 +459,6 @@ async fn handle_eom(context: &mut EomContext<SessionData>) -> Status {
                         }
                     }
                 }
-                RecipientStatus::Remove => {
-                    match context
-                        .actions
-                        .delete_recipient(model.recipient.clone())
-                        .await
-                    {
-                        Ok(_) => (),
-                        Err(e) => {
-                            warn!("Unable to remove recipient: {}", e);
-                            return Status::Tempfail;
-                        }
-                    }
-                }
                 RecipientStatus::Keep => (),
             };
         }
@@ -492,15 +469,6 @@ async fn handle_eom(context: &mut EomContext<SessionData>) -> Status {
 fn is_allowed_ip(allowed_networks: Arc<Vec<IpNet>>, address: IpAddr) -> bool {
     for allowed_network in allowed_networks.as_ref() {
         if allowed_network.contains(&address) {
-            return true;
-        }
-    }
-    false
-}
-
-fn is_spam_address(spam_addresses: Vec<String>, address: String) -> bool {
-    for spam_address in spam_addresses {
-        if spam_address.eq_ignore_ascii_case(&address) {
             return true;
         }
     }

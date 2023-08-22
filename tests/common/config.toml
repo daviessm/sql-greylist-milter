@@ -13,10 +13,7 @@ db_name = ":memory:"
 allow_from_ranges = [ "2001:db8:ad5d:2402::/64", "2001:db8:ad5d:2403::/64", "2001:db8:ad5d:2405::/64", "10.255.2.0/24", "10.255.3.0/24", "10.255.5.0/24" ]
 greylist_time_seconds = 300
 
-[spam]
-reject_message = "Spam protection says go away"
-recipients = [ "spam@test.example" ]
-
 [recipient_rewriting]
 rewrites = [ { old_to = "test1@test.example", action = "Add", new_to = [ "test3@test.example", "test4@test.example" ] },
-             { old_to = "test2@test.example", action = "Replace", new_to = [ "test3@test.example", "test4@test.example" ] } ]
+             { old_to = "test2@test.example", action = "Replace", new_to = [ "test3@test.example", "test4@test.example" ] },
+             { old_to = "spam@test.example", action = "Replace", new_to = [] } ]

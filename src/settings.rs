@@ -9,7 +9,6 @@ pub struct Settings {
     milter: Milter,
     database: Database,
     greylist: Option<Greylist>,
-    spam: Option<Spam>,
     recipient_rewriting: Option<RecipientRewriting>,
 }
 
@@ -32,12 +31,6 @@ struct Database {
 struct Greylist {
     allow_from_ranges: Vec<String>,
     greylist_time_seconds: i64,
-}
-
-#[derive(Debug, Deserialize)]
-struct Spam {
-    reject_message: String,
-    recipients: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -104,17 +97,6 @@ impl Settings {
             Some(greylist) => greylist.greylist_time_seconds,
             None => 0,
         }
-    }
-
-    pub fn get_blocked_senders(&self) -> Vec<String> {
-        match &self.spam {
-            Some(spam) => spam.recipients.clone(),
-            None => vec![],
-        }
-    }
-
-    pub fn get_spam_message(&self) -> Option<String> {
-        self.spam.as_ref().map(|spam| spam.reject_message.clone())
     }
 
     pub fn get_rewrites(&self) -> Vec<Rewrite> {
