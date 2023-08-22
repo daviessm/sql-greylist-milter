@@ -8,8 +8,8 @@ use entity::{
     recipient,
 };
 use indymilter::{
-    Actions, Callbacks, Context, ContextActions, EomContext, MacroStage, NegotiateContext,
-    ProtoOpts, SocketInfo, Status,
+    Callbacks, Context, ContextActions, EomContext, MacroStage, NegotiateContext, SocketInfo,
+    Status,
 };
 use ipnet::IpNet;
 use migration::{Migrator, MigratorTrait};
@@ -115,12 +115,9 @@ pub async fn real_main(config_location: String, shutdown: impl Future) {
 }
 
 async fn negotiate(context: &mut NegotiateContext<SessionData>) -> Status {
-    context.requested_actions |= Actions::DELETE_RCPT | Actions::ADD_RCPT;
-    context.requested_opts |=
-        ProtoOpts::NO_HELO | ProtoOpts::NO_DATA | ProtoOpts::NO_BODY | ProtoOpts::NO_UNKNOWN;
     context
         .requested_macros
-        .insert(MacroStage::Eom, CString::new("{auth_type}").unwrap());
+        .insert(MacroStage::Eoh, CString::new("{auth_type}").unwrap());
 
     Status::Continue
 }
@@ -299,6 +296,7 @@ async fn handle_eoh(
         "EOH, {{auth_type}}: {:?}",
         session.macros.get(&CString::new("{auth_type}").unwrap())
     );
+    debug!("{:?}", session.macros);
     let session_data = session.data.as_mut().expect("No session?");
 
     // Check we have enough information in the session now
@@ -309,8 +307,8 @@ async fn handle_eoh(
         || session_data.recipients.is_empty()
     {
         warn!(
-            "End of headers but we don't have all the information we need? {:?}",
-            session_data
+            ?session_data,
+            "End of headers but we don't have all the information we need?"
         );
         return Status::Tempfail;
     }
@@ -323,19 +321,17 @@ async fn handle_eoh(
             insert_mail(session_data.to_owned(), db)
                 .await
                 .expect("Unable to connect to database");
-            Status::Accept
+            debug!(?session_data.mail.sending_ip, "Locally accepted");
+            Status::Continue
         // Authenticated users
-        } else if session
-            .macros
-            .get(&CString::new("{auth_type}").unwrap())
-            .is_some()
-        {
+        } else if let Some(auth_type) = session.macros.get(&CString::new("{auth_type}").unwrap()) {
             session_data.mail.status = Set(AuthenticatedAccepted);
             session_data.mail.time_accepted = Set(Some(Utc::now().into()));
             insert_mail(session_data.to_owned(), db)
                 .await
                 .expect("Unable to connect to database");
-            Status::Accept
+            debug!(?auth_type, "Authenticated accepted");
+            Status::Continue
         // Whitelisted networks
         } else if is_allowed_ip(allowed_networks, from_ip) {
             session_data.mail.status = Set(IpAccepted);
@@ -343,7 +339,8 @@ async fn handle_eoh(
             insert_mail(session_data.to_owned(), db)
                 .await
                 .expect("Unable to connect to database");
-            Status::Accept
+            debug!(?from_ip, "IP accepted");
+            Status::Continue
         } else {
             // Does the message already exist in the database?
             if let Ok(Some(existing_message)) = MailEntity::find()
@@ -353,9 +350,9 @@ async fn handle_eoh(
             {
                 match existing_message.status {
                     Greylisted => {
+                        let previously_received = existing_message.time_received;
                         // If the message was greylisted but we've waited long enough
-                        if existing_message
-                            .time_received
+                        if previously_received
                             .checked_add_signed(Duration::seconds(greylist_time_seconds))
                             .unwrap()
                             < Utc::now()
@@ -368,9 +365,11 @@ async fn handle_eoh(
                                 .update(db.as_ref())
                                 .await
                                 .expect("Unable to connect to database");
-                            Status::Accept
+                            debug!(?previously_received, "Greylisted accepted");
+                            Status::Continue
                         } else {
                             // We know there's already a record for this message in the database; reject this one
+                            debug!(?previously_received, "Still greylisted");
                             Status::Tempfail
                         }
                     }
@@ -402,13 +401,15 @@ async fn handle_eoh(
                     insert_mail(session_data.to_owned(), db)
                         .await
                         .expect("Unable to connect to database");
-                    Status::Accept
+                    debug!("Known good - accepted");
+                    Status::Continue
                 // Nope? Ok, then we'll have to greylist
                 } else if greylist_time_seconds > 0 {
                     session_data.mail.status = Set(Greylisted);
                     insert_mail(session_data.to_owned(), db)
                         .await
                         .expect("Unable to connect to database");
+                    debug!("Greylist");
                     Status::Tempfail
                 // Greylisting is disabled
                 } else {
@@ -417,7 +418,8 @@ async fn handle_eoh(
                     insert_mail(session_data.to_owned(), db)
                         .await
                         .expect("Unable to connect to database");
-                    Status::Accept
+                    debug!("Greylisting disabled - accepted");
+                    Status::Continue
                 }
             }
         }
@@ -431,7 +433,6 @@ async fn handle_eoh(
 }
 
 async fn handle_eom(context: &mut EomContext<SessionData>) -> Status {
-    debug!("EOM");
     if let Some(data) = &context.data {
         for (model, recipient_status) in &data.recipients {
             match recipient_status {
@@ -485,7 +486,6 @@ async fn handle_eom(context: &mut EomContext<SessionData>) -> Status {
             };
         }
     }
-    debug!("End EOM");
     Status::Continue
 }
 
